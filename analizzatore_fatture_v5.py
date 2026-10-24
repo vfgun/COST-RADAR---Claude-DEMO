@@ -245,10 +245,16 @@ def file_tasks(f) -> list:
 
 
 # ---------------------------------------------------------------- 2) estrazione e costi
+EXTRACT_ERRORS: list[str] = []   # ultimi errori di lettura (per spiegare all'utente perche' un file non e' stato letto)
+
+
 def extract_chunk(content) -> dict | None:
     try:
         return parse_json(ask(FAST, EXTRACT, content, max_tokens=8000))
-    except Exception:
+    except Exception as e:
+        EXTRACT_ERRORS.append(f"{type(e).__name__}: {str(e)[:300]}")
+        del EXTRACT_ERRORS[:-20]
+        app.logger.warning("lettura blocco fallita: %s", EXTRACT_ERRORS[-1])
         return None  # contato come "blocco non letto"
 
 
@@ -989,13 +995,22 @@ def analyze():
         with ThreadPoolExecutor(WORKERS) as pool:
             results = list(pool.map(extract_chunk, tasks))
         failed = results.count(None)
+        if failed == len(results):  # nessun blocco letto: spiego il motivo vero invece di un generico "nessuna linea"
+            why = EXTRACT_ERRORS[-1] if EXTRACT_ERRORS else "motivo non disponibile"
+            hint = (" Controlla ANTHROPIC_API_KEY (valida, con credito) sul servizio." if any(
+                k in why for k in ("Authentication", "PermissionDenied", "credit", "401", "403", "invalid x-api-key")) else "")
+            return jsonify(errore=f"Lettura del file non riuscita: {why}.{hint}")
         good = [r for r in results if r]
         meta, lines, discounts = merge(good)
         forn, cliente = merge_energy(good)
         if forn and not lines:
             return analyze_energy(meta, forn, cliente, failed)
         if not lines:
-            return jsonify(errore="Nessuna linea voce/dati/fisso trovata nella fattura.")
+            names = ", ".join(f.filename or "?" for f in request.files.getlist("f"))
+            return jsonify(errore="Nessuna linea voce/dati/fisso e nessuna fornitura luce/gas trovata nel file "
+                                  f"({names}). Blocchi letti: {len(good)} di {len(results)}. "
+                                  "Carica le pagine con il dettaglio (numeri di telefono o POD/PDR e importi), non solo il riepilogo.",
+                           motore="v5.1")
         country = (request.form.get("paese") or meta.get("paese") or "").strip()
         if not country:
             return jsonify(errore="Paese non rilevato dalla fattura: indicalo nel campo 'Paese' e riprova.")
